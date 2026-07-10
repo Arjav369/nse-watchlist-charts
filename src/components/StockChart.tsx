@@ -13,6 +13,8 @@ import {
   ColorType,
 } from "lightweight-charts";
 
+import type { IndicatorSummary } from "@/lib/indicators";
+
 type Candle = {
   time: number;
   open: number;
@@ -26,7 +28,13 @@ type Range = "1d" | "5d" | "1m" | "3m";
 
 const RANGES: Range[] = ["1d", "5d", "1m", "3m"];
 
-export default function StockChart({ symbol }: { symbol: string }) {
+export default function StockChart({
+  symbol,
+  onIndicators,
+}: {
+  symbol: string;
+  onIndicators?: (symbol: string, indicators: IndicatorSummary | null) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -36,6 +44,16 @@ export default function StockChart({ symbol }: { symbol: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastClose, setLastClose] = useState<number | null>(null);
+  const [indicators, setIndicators] = useState<IndicatorSummary | null>(null);
+
+  // Keep the latest callback in a ref so the fetch effect below doesn't
+  // need it as a dependency (parents rarely memoize inline callbacks,
+  // which would otherwise cause a refetch loop on every render). Updated
+  // in an effect, not during render, to satisfy the refs-during-render rule.
+  const onIndicatorsRef = useRef(onIndicators);
+  useEffect(() => {
+    onIndicatorsRef.current = onIndicators;
+  });
 
   // Create chart once on mount.
   useEffect(() => {
@@ -106,10 +124,17 @@ export default function StockChart({ symbol }: { symbol: string }) {
           setError(json.error ?? "Failed to load data");
           candleSeriesRef.current?.setData([]);
           volumeSeriesRef.current?.setData([]);
+          setIndicators(null);
+          onIndicatorsRef.current?.(symbol, null);
           return;
         }
 
         const candles: Candle[] = json.candles;
+        const ind: IndicatorSummary | undefined = json.indicators;
+        if (ind) {
+          setIndicators(ind);
+          onIndicatorsRef.current?.(symbol, ind);
+        }
 
         const candleData: CandlestickData[] = candles.map((c) => ({
           time: c.time as UTCTimestamp,
@@ -135,6 +160,8 @@ export default function StockChart({ symbol }: { symbol: string }) {
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "Network error");
+          setIndicators(null);
+          onIndicatorsRef.current?.(symbol, null);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -176,6 +203,68 @@ export default function StockChart({ symbol }: { symbol: string }) {
           ))}
         </div>
       </div>
+
+      {indicators && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
+          <span>
+            RSI{" "}
+            <span
+              className={
+                indicators.rsiLabel === "Overbought"
+                  ? "font-semibold text-red-400"
+                  : indicators.rsiLabel === "Oversold"
+                  ? "font-semibold text-emerald-400"
+                  : "font-semibold text-gray-200"
+              }
+            >
+              {indicators.rsi !== null ? indicators.rsi.toFixed(1) : "—"}
+            </span>
+          </span>
+
+          <span>
+            MFI{" "}
+            <span
+              className={
+                indicators.mfiLabel === "Strongly Overbought" ||
+                indicators.mfiLabel === "Overbought"
+                  ? "font-semibold text-red-400"
+                  : indicators.mfiLabel === "Oversold"
+                  ? "font-semibold text-emerald-400"
+                  : "font-semibold text-gray-200"
+              }
+            >
+              {indicators.mfi !== null ? indicators.mfi.toFixed(1) : "—"}
+            </span>
+          </span>
+
+          <span>
+            MA{" "}
+            <span className="font-semibold text-emerald-400">
+              {indicators.bullishMACount}▲
+            </span>{" "}
+            <span className="font-semibold text-red-400">
+              {indicators.bearishMACount}▼
+            </span>
+          </span>
+
+          <span>
+            Vol{" "}
+            <span
+              className={
+                indicators.volumeVsAvgPct !== null &&
+                indicators.volumeVsAvgPct >= 130
+                  ? "font-semibold text-emerald-400"
+                  : "font-semibold text-gray-200"
+              }
+            >
+              {indicators.volumeVsAvgPct !== null
+                ? `${(indicators.volumeVsAvgPct / 100).toFixed(1)}x`
+                : "—"}
+            </span>{" "}
+            avg
+          </span>
+        </div>
+      )}
 
       <div className="relative h-[320px] w-full">
         {loading && (
