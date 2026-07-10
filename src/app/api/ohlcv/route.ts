@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import type { ChartResultArray } from "yahoo-finance2/modules/chart";
+import { computeIndicatorSummary, type OHLCV } from "@/lib/indicators";
 
 // yahoo-finance2 v3+ requires explicit instantiation; the default export
 // is the class itself, not a ready-to-use singleton.
 const yahooFinance = new YahooFinance();
 
 /**
- * Maps a human-friendly range string to a start date.
- * "1d" here means "today's candle", which we approximate by pulling
- * the last 5 calendar days at 1-day interval and taking the latest row
- * (since exchanges close for weekends/holidays, a literal 1-day lookback
- * can return zero rows).
+ * Maps a human-friendly range string to a *display* window. This is what
+ * the chart actually shows — it is separate from how much history we
+ * fetch, since indicators like the 200-day EMA need far more lookback
+ * than what's visible on screen.
  */
-function rangeToStartDate(range: string): { start: Date; interval: "1d" } {
+function rangeToDisplayStart(range: string): Date {
   const now = new Date();
   const start = new Date(now);
 
@@ -34,8 +34,14 @@ function rangeToStartDate(range: string): { start: Date; interval: "1d" } {
       start.setMonth(start.getMonth() - 3);
   }
 
-  return { start, interval: "1d" };
+  return start;
 }
+
+// Indicators need a much longer lookback than the visible chart window —
+// a 200-day EMA needs roughly a year of calendar days (accounting for
+// weekends/holidays) to fully seed. We always fetch this much regardless
+// of the requested display range, then slice for what's shown on screen.
+const INDICATOR_LOOKBACK_DAYS = 400;
 
 export async function GET(req: NextRequest) {
   const searchParams = req.nextUrl.searchParams;
@@ -55,13 +61,15 @@ export async function GET(req: NextRequest) {
     ? cleanSymbol
     : `${cleanSymbol}.NS`;
 
-  const { start, interval } = rangeToStartDate(range);
+  const displayStart = rangeToDisplayStart(range);
+  const fetchStart = new Date();
+  fetchStart.setDate(fetchStart.getDate() - INDICATOR_LOOKBACK_DAYS);
 
   try {
     const result: ChartResultArray = await yahooFinance.chart(yahooSymbol, {
-      period1: start,
+      period1: fetchStart,
       period2: new Date(),
-      interval,
+      interval: "1d",
       return: "array",
     });
 
@@ -80,7 +88,7 @@ export async function GET(req: NextRequest) {
     // Shape into plain OHLCV rows. lightweight-charts wants UNIX seconds
     // for time, and will reject rows with null close (non-trading days
     // that sometimes leak through).
-    const candles = quotes
+    const fullHistory: OHLCV[] = quotes
       .filter((q) => q.close !== null && q.open !== null)
       .map((q) => ({
         time: Math.floor(new Date(q.date).getTime() / 1000),
@@ -91,10 +99,19 @@ export async function GET(req: NextRequest) {
         volume: q.volume ?? 0,
       }));
 
+    // Indicators are computed on the FULL fetched history (so a 200-day
+    // EMA has enough runway), independent of what's actually shown.
+    const indicators = computeIndicatorSummary(fullHistory);
+
+    // Chart display is sliced down to just the requested range.
+    const displayStartSeconds = Math.floor(displayStart.getTime() / 1000);
+    const candles = fullHistory.filter((c) => c.time >= displayStartSeconds);
+
     return NextResponse.json({
       symbol: yahooSymbol,
       range,
       candles,
+      indicators,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
